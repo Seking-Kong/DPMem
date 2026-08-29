@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+build/
+dist/
+
+# Environments and editors
+.env
+.venv/
+venv/
+.idea/
+.vscode/
+
+# Local datasets, checkpoints, and generated outputs
+data/
+datasets/
+checkpoints/
+outputs/
+results/
+logs/
+*.log
+*.jsonl
+*.pt
+*.pth
+*.bin
+*.safetensors
+
+# Local upstream source and pre-release manuscript
+lmms-eval/
+AAAI2027-DPMem.pdf
+
+# Original local layout retained for recovery
+.local_backup/
+Figures/
+cudamem.py
+requirement.txt
+
+# Archives and operating-system files
+*.zip
+*.7z
+.DS_Store
+Thumbs.db

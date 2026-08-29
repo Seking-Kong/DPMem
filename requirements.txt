@@ -1,0 +1,12 @@
+accelerate==1.5.2
+decord==0.6.0
+ffmpeg-python==0.2.0
+moviepy==1.0.3
+numpy>=1.26,<3
+opencv-python-headless==4.11.0.86
+pandas==2.3.3
+Pillow==12.1.0
+pyarrow==22.0.0
+qwen-vl-utils==0.0.10
+tqdm>=4.66
+transformers==5.1.0
