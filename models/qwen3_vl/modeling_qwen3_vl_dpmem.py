@@ -1,8 +1,8 @@
 """
-Qwen3VL with DTD (Dynamic Token Drop) support.
+Qwen3-VL integration for DPMem.
 
 Inherits all base classes from the built-in transformers Qwen3VL implementation,
-and only adds the token_drop logic via subclassing.
+and adds DPMem visual token compression through subclassing.
 """
 
 import json
@@ -115,8 +115,6 @@ class Qwen3VLModel(_Qwen3VLModel):
 
         cnt_total, cnt_drop = 0, 0
         keep_masks_per_batch: List[torch.Tensor] = []
-
-        self._meks_frame_info = None
 
         if not hasattr(self, "_prev_chunk_tail_mask"):
             self._prev_chunk_tail_mask = None
@@ -263,25 +261,6 @@ class Qwen3VLModel(_Qwen3VLModel):
 
                         prev_frame = curr_frame
 
-            if (
-                i == 0
-                and len(visual_token_indices) > 0
-                and video_grid_thw is not None
-                and len(vis_frames) > 0
-            ):
-                meks_frame_info = []
-                for frame_idx, frame_indices in enumerate(vis_frames):
-                    frame_embeds = inputs_embeds[i, frame_indices]
-                    local_keep = keep_mask[frame_indices]
-                    kept_feats = frame_embeds[local_keep].detach()
-                    full_mean = frame_embeds.detach().mean(dim=0)
-                    meks_frame_info.append({
-                        "total": int(len(frame_indices)),
-                        "kept": int(local_keep.sum().item()),
-                        "feats": kept_feats,
-                        "full_mean": full_mean,
-                    })
-                self._meks_frame_info = meks_frame_info
 
             if (
                 i == 0

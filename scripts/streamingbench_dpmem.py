@@ -24,8 +24,7 @@ sys.path.append(osp.abspath(osp.join(osp.dirname(__file__), '..')))
 """
 Changed the pruning target from the current frame to the preceding frame.
 """
-from models.qwen3_vl.modeling_qwen3_vl_drop_prev import Qwen3VLForConditionalGeneration
-from models.qwen3_vl.meks import MEKSSelector
+from models.qwen3_vl.modeling_qwen3_vl_dpmem import Qwen3VLForConditionalGeneration
 
 
 def _b2mb(x: int) -> float:
@@ -70,17 +69,6 @@ MAX_FRAMES = 1016
 
 FRAMES_PER_CHUNK = 20
 SAMPLING_FPS = 1
-
-USE_MEKS = False
-MEKS_ALPHA = 1.0
-MEKS_BETA = 0.3
-MEKS_GAMMA = 0.5
-MEKS_THRESHOLD = 0.5
-MEKS_QE_TOP_K = 8
-MEKS_NOVELTY_MODE = "relative"
-MEKS_QUERY_MODE = "gt_question"
-MEKS_EXCLUDE_FIRST_LAST_FROM_NOV = True
-MEKS_DIR = None
 
 
 
@@ -409,185 +397,6 @@ def log_summary_from_files(output_jsonl, drop_jsonl, logger_obj):
             logger_obj.info(f"Total drop ratio (weighted drop ratio): {100 * total_dr:.1f}%")
             logger_obj.info(f"Average drop ratio (unweighted drop ratio): {100 * avg_dr:.1f}%")
 
-def append_chunk_text(
-    meks_dir: str,
-    question_id: str,
-    chunk_id: int,
-    is_final: bool,
-    text: str,
-    question: str = None,
-    options=None,
-    logger_obj=None,
-):
-    """Append the LLM output of one chunk to keyframe/<qid>/chunk_texts.json.
-
-    Stored as a single JSON object:
-        {"question_id": ..., "chunks": [ {chunk_id, is_final, text, question?}, ... ]}
-
-    The final chunk (the one where the benchmark question is actually asked) is
-    flagged with is_final=True and additionally carries the question text, so
-    the on-disk trail is self-contained.
-    """
-    try:
-        out_path = osp.join(meks_dir, str(question_id), "chunk_texts.json")
-        os.makedirs(osp.dirname(out_path), exist_ok=True)
-
-        payload: dict = {"question_id": str(question_id), "chunks": []}
-        if osp.exists(out_path):
-            try:
-                with open(out_path, "r", encoding="utf-8") as f:
-                    loaded = json.load(f)
-                if isinstance(loaded, dict) and "chunks" in loaded:
-                    payload = loaded
-            except Exception as load_e:
-                if logger_obj is not None:
-                    logger_obj.warning(
-                        f"[MEKS] {out_path} corrupted, re-initializing: {load_e}"
-                    )
-
-        payload["chunks"] = [c for c in payload.get("chunks", []) if c.get("chunk_id") != chunk_id]
-        record = {
-            "chunk_id": int(chunk_id),
-            "is_final": bool(is_final),
-            "text": text if text is not None else "",
-        }
-        if is_final and question is not None:
-            record["question"] = question
-        if is_final and options is not None:
-            record["options"] = options
-        payload["chunks"].append(record)
-        payload["chunks"].sort(key=lambda c: c["chunk_id"])
-
-        with open(out_path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        if logger_obj is not None:
-            logger_obj.warning(
-                f"[MEKS] failed to append chunk text for {question_id} chunk {chunk_id}: {e}"
-            )
-
-
-def run_meks_on_window(
-    meks_selector,
-    model,
-    frame_list,
-    indices_list,
-    question_text,
-    summary_text,
-    meks_dir,
-    question_id,
-    chunk_id,
-    logger_obj,
-):
-    """Score frames in the current window via MEKS and persist top-k keyframes.
-
-    frame_info is read from model.model._meks_frame_info (populated by token_drop).
-    If MEKS is disabled, frame_info missing, or any step fails, we log and return.
-    """
-    if meks_selector is None:
-        return
-    try:
-        frame_info = getattr(model.model, "_meks_frame_info", None)
-        if frame_info is None or len(frame_info) == 0:
-            logger_obj.debug(
-                f"[MEKS] no frame_info for {question_id} chunk {chunk_id}, skip"
-            )
-            return
-
-        n_info = len(frame_info)
-        n_frames = len(frame_list)
-        if n_info == n_frames:
-            map_mode = "identity"
-            group_size = 1
-        elif n_info > 0 and n_frames % n_info == 0:
-            map_mode = "group_last"
-            group_size = n_frames // n_info
-        else:
-            map_mode = "nearest"
-            group_size = 0
-            logger_obj.warning(
-                f"[MEKS] unexpected frame count ratio for {question_id} chunk {chunk_id}: "
-                f"frame_info={n_info}, frame_list={n_frames}; falling back to nearest-neighbor mapping"
-            )
-
-        selected_info_idx, detailed_scores = meks_selector.select(
-            frame_info=frame_info,
-            query_text=question_text,
-            summary_text=summary_text,
-        )
-        if not selected_info_idx:
-            if detailed_scores:
-                max_total = max(d["S_total"] for d in detailed_scores)
-                logger_obj.info(
-                    f"[MEKS] no keyframe passed threshold for {question_id} chunk {chunk_id}: "
-                    f"n_frames_info={len(detailed_scores)}, max_S_total={max_total:.4f}, "
-                    f"threshold={meks_selector.threshold:.4f}"
-                )
-            return
-
-        chunk_dir = osp.join(meks_dir, str(question_id), f"chunk_{chunk_id}")
-        os.makedirs(chunk_dir, exist_ok=True)
-
-        pad_width = max(2, len(str(max(1, n_frames - 1))))
-
-        selected_records = []
-        for info_idx in selected_info_idx:
-            if map_mode == "identity":
-                frame_pos = info_idx
-            elif map_mode == "group_last":
-                frame_pos = info_idx * group_size + (group_size - 1)
-            else:
-                frame_pos = int(round(info_idx * (n_frames - 1) / max(1, n_info - 1)))
-            frame_pos = max(0, min(n_frames - 1, frame_pos))
-
-            orig_idx = int(indices_list[frame_pos])
-            jpg_name = f"frame_{frame_pos:0{pad_width}d}.jpg"
-            jpg_path = osp.join(chunk_dir, jpg_name)
-            try:
-                frame_list[frame_pos].save(jpg_path, "JPEG", quality=92)
-            except Exception as save_e:
-                logger_obj.warning(f"[MEKS] failed to save {jpg_path}: {save_e}")
-                continue
-
-            score = detailed_scores[info_idx]
-            selected_records.append({
-                "frame_pos": int(frame_pos),
-                "file": jpg_name,
-                "S_qe": score["S_qe"],
-                "S_nov": score["S_nov"],
-                "S_gap": score["S_gap"],
-                "S_total": score["S_total"],
-            })
-
-        meta_path = osp.join(meks_dir, str(question_id), "meks_scores.json")
-        os.makedirs(osp.dirname(meta_path), exist_ok=True)
-        meta_obj: dict = {"question_id": str(question_id), "chunks": []}
-        if osp.exists(meta_path):
-            try:
-                with open(meta_path, "r", encoding="utf-8") as f:
-                    loaded = json.load(f)
-                if isinstance(loaded, dict) and "chunks" in loaded:
-                    meta_obj = loaded
-            except Exception as load_e:
-                logger_obj.warning(
-                    f"[MEKS] {meta_path} is corrupted, re-initializing: {load_e}"
-                )
-
-        meta_obj["chunks"] = [c for c in meta_obj.get("chunks", []) if c.get("chunk_id") != chunk_id]
-        meta_obj["chunks"].append({
-            "chunk_id": int(chunk_id),
-            "selected": selected_records,
-        })
-        meta_obj["chunks"].sort(key=lambda c: c["chunk_id"])
-        with open(meta_path, "w", encoding="utf-8") as f:
-            json.dump(meta_obj, f, ensure_ascii=False, indent=2)
-
-    except Exception as e:
-        logger_obj.warning(f"[MEKS] scoring failed for {question_id} chunk {chunk_id}: {e}")
-    finally:
-        model.model._meks_frame_info = None
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--run_name", type=str, default=RUN_NAME)
@@ -619,37 +428,6 @@ if __name__ == "__main__":
     parser.add_argument("--gpus_per_worker", type=int, default=1, help="Number of GPUs per worker (e.g. 2 means each worker uses 2 GPUs)")
     parser.add_argument("--run_id", type=str, default="", help="Shared run id across workers")
     parser.add_argument("--worker_mode", action="store_true", help="Internal flag used by launcher process")
-    parser.add_argument("--use_meks", action="store_true", help="Enable MEKS keyframe selection on intermediate windows")
-    parser.add_argument("--meks_alpha", type=float, default=MEKS_ALPHA, help="Weight for Query-Evidence score")
-    parser.add_argument("--meks_beta", type=float, default=MEKS_BETA, help="Weight for Novelty score")
-    parser.add_argument("--meks_gamma", type=float, default=MEKS_GAMMA, help="Weight for Text-Gap score")
-    parser.add_argument("--meks_threshold", type=float, default=MEKS_THRESHOLD, help="Fused-score threshold; every frame with S_total > threshold becomes a keyframe")
-    parser.add_argument("--meks_qe_top_k", type=int, default=MEKS_QE_TOP_K, help="Top-k patches used inside Query-Evidence scoring")
-    parser.add_argument("--meks_novelty_mode", type=str, default=MEKS_NOVELTY_MODE, choices=["absolute", "relative"], help="Novelty score mode: 'absolute' = kept/total; 'relative' = kept/total minus window mean (cancels drop-prev boundary bias)")
-    parser.add_argument(
-        "--meks_query_mode",
-        type=str,
-        default=MEKS_QUERY_MODE,
-        choices=["gt_question", "running_summary", "none"],
-        help=(
-            "Where z_Q comes from. 'gt_question' uses the benchmark's question "
-            "(valid for OFFLINE eval only, since a real streaming system does "
-            "not know the future question). 'running_summary' uses the cumulative "
-            "text context from previous chunks as a pseudo-query (true online "
-            "semantics). 'none' disables S_qe entirely (equivalent to alpha=0 "
-            "but still logs the field)."
-        ),
-    )
-    parser.add_argument(
-        "--meks_include_first_last_in_nov",
-        action="store_true",
-        help=(
-            "If set, DO NOT exclude first/last frames from the S_nov contest. "
-            "By default they are excluded because drop-prev structurally "
-            "protects them (kept/total always = 1.0)."
-        ),
-    )
-    parser.add_argument("--meks_dir", type=str, default="", help="Directory to store MEKS keyframes; defaults to <result_dir>/keyframe")
     args = parser.parse_args()
 
     if args.num_chunks > 1 and args.chunk_idx < 0 and not args.worker_mode:
@@ -723,20 +501,6 @@ if __name__ == "__main__":
             ]
             if args.drop_relative:
                 cmd.append("--drop_relative")
-            cmd += [
-                "--meks_alpha", str(args.meks_alpha),
-                "--meks_beta", str(args.meks_beta),
-                "--meks_gamma", str(args.meks_gamma),
-                "--meks_threshold", str(args.meks_threshold),
-                "--meks_qe_top_k", str(args.meks_qe_top_k),
-                "--meks_novelty_mode", args.meks_novelty_mode,
-                "--meks_query_mode", args.meks_query_mode,
-                "--meks_dir", args.meks_dir,
-            ]
-            if args.use_meks:
-                cmd.append("--use_meks")
-            if args.meks_include_first_last_in_nov:
-                cmd.append("--meks_include_first_last_in_nov")
             logger.info(f"Launch chunk {idx}/{args.num_chunks} on GPU {','.join(worker_gpu_ids)}")
             procs.append(subprocess.Popen(cmd, env=worker_env))
 
@@ -787,23 +551,11 @@ if __name__ == "__main__":
     SAMPLING_FPS = args.fps
     MAX_NEW_TOKENS_INTERMEDIATE = args.max_new_tokens_intermediate
     MAX_NEW_TOKENS_FINAL = args.max_new_tokens_final
-    USE_MEKS = bool(args.use_meks)
-    MEKS_ALPHA = args.meks_alpha
-    MEKS_BETA = args.meks_beta
-    MEKS_GAMMA = args.meks_gamma
-    MEKS_THRESHOLD = args.meks_threshold
-    MEKS_QE_TOP_K = args.meks_qe_top_k
-    MEKS_NOVELTY_MODE = args.meks_novelty_mode
-    MEKS_QUERY_MODE = args.meks_query_mode
-    MEKS_EXCLUDE_FIRST_LAST_FROM_NOV = not args.meks_include_first_last_in_nov
-    MEKS_DIR = args.meks_dir if args.meks_dir else osp.join(RESULT_DIR, "keyframe")
 
     os.makedirs(RESULT_DIR, exist_ok=True)
     os.makedirs(osp.join(RESULT_DIR, 'output'), exist_ok=True)
     os.makedirs(osp.join(RESULT_DIR, 'drop'), exist_ok=True)
     os.makedirs(osp.join(RESULT_DIR, 'log'), exist_ok=True)
-    if USE_MEKS:
-        os.makedirs(MEKS_DIR, exist_ok=True)
     
     file_handler = logging.FileHandler(LOG_PATH)
     file_handler.setFormatter(fmt)
@@ -827,12 +579,6 @@ if __name__ == "__main__":
     logger.info(f"Min frames: {MIN_FRAMES}")
     logger.info(f"Frames per chunk: {FRAMES_PER_CHUNK}")
     logger.info(f"FPS: {SAMPLING_FPS}")
-    logger.info(
-        f"MEKS: enabled={USE_MEKS}, alpha={MEKS_ALPHA}, beta={MEKS_BETA}, gamma={MEKS_GAMMA}, "
-        f"threshold={MEKS_THRESHOLD}, qe_top_k={MEKS_QE_TOP_K}, novelty_mode={MEKS_NOVELTY_MODE}, "
-        f"query_mode={MEKS_QUERY_MODE}, exclude_first_last_from_nov={MEKS_EXCLUDE_FIRST_LAST_FROM_NOV}, "
-        f"dir={MEKS_DIR}"
-    )
     
     torch.manual_seed(1235)
     logger.info(f"Set manual seed to 1234")
@@ -849,24 +595,6 @@ if __name__ == "__main__":
     )
     logger.info(f"Load model and processor from {CKPT_PATH}")
 
-    meks_selector = None
-    if USE_MEKS:
-        try:
-            meks_selector = MEKSSelector(
-                model=model,
-                tokenizer=processor.tokenizer,
-                alpha=MEKS_ALPHA,
-                beta=MEKS_BETA,
-                gamma=MEKS_GAMMA,
-                threshold=MEKS_THRESHOLD,
-                qe_top_k=MEKS_QE_TOP_K,
-                novelty_mode=MEKS_NOVELTY_MODE,
-                exclude_first_last_from_nov=MEKS_EXCLUDE_FIRST_LAST_FROM_NOV,
-            )
-            logger.info("MEKS selector initialized.")
-        except Exception as e:
-            logger.error(f"Failed to init MEKSSelector, MEKS disabled: {e}")
-            meks_selector = None
     
     task_df = pd.read_csv(TASK_CSV)
     if args.chunk_idx >= 0:
@@ -932,17 +660,6 @@ if __name__ == "__main__":
                                 max_new_tokens=MAX_NEW_TOKENS_FINAL,
                             )
 
-                            if USE_MEKS:
-                                append_chunk_text(
-                                    meks_dir=MEKS_DIR,
-                                    question_id=question_id,
-                                    chunk_id=chunk_id,
-                                    is_final=True,
-                                    question=question,
-                                    text=response,
-                                    options=eval(options),
-                                    logger_obj=logger,
-                                )
                         else:
                             prev_summary = context_text if context_text else " "
                             message_text = prompt_v2t.format(PREV_SUMMARY=prev_summary)
@@ -966,40 +683,8 @@ if __name__ == "__main__":
                                 max_new_tokens=MAX_NEW_TOKENS_INTERMEDIATE,
                             )
                             
-                            prev_context_for_meks = context_text
-
                             context_text = response
 
-                            if USE_MEKS:
-                                append_chunk_text(
-                                    meks_dir=MEKS_DIR,
-                                    question_id=question_id,
-                                    chunk_id=chunk_id,
-                                    is_final=False,
-                                    text=response,
-                                    logger_obj=logger,
-                                )
-
-                            if USE_MEKS and meks_selector is not None:
-                                if MEKS_QUERY_MODE == "gt_question":
-                                    effective_query = question
-                                elif MEKS_QUERY_MODE == "running_summary":
-                                    effective_query = prev_context_for_meks if prev_context_for_meks else None
-                                else:
-                                    effective_query = None
-
-                                run_meks_on_window(
-                                    meks_selector=meks_selector,
-                                    model=model,
-                                    frame_list=frame_list,
-                                    indices_list=indices_list,
-                                    question_text=effective_query,
-                                    summary_text=response,
-                                    meks_dir=MEKS_DIR,
-                                    question_id=question_id,
-                                    chunk_id=chunk_id,
-                                    logger_obj=logger,
-                                )
 
                             frame_list = [frame_list[-1]]
                             indices_list = [indices_list[-1]]
@@ -1079,5 +764,3 @@ if __name__ == "__main__":
     
     logger.info(f"Inference cost time: {cost_time // 3600}h {(cost_time % 3600) // 60}m {cost_time % 60}s")
     
-
-

@@ -22,7 +22,7 @@ import tempfile
 import shutil
 
 sys.path.append(osp.abspath(osp.join(osp.dirname(__file__), '..')))
-from models.qwen3_vl.modeling_qwen3_vl_drop_prev import Qwen3VLForConditionalGeneration
+from models.qwen3_vl.modeling_qwen3_vl_dpmem import Qwen3VLForConditionalGeneration
 
 def _b2mb(x: int) -> float:
     return round(x / 1024 / 1024, 2)
@@ -1066,5 +1066,3 @@ if __name__ == "__main__":
             logger.info(f"Average drop ratio (unweighted drop ratio): {100*avg_dr:.1f}%")
 
     logger.info(f"Inference cost time: {cost_time // 3600}h {(cost_time % 3600) // 60}m {cost_time % 60}s")
-
-
