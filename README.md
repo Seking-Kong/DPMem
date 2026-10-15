@@ -1,4 +1,3 @@
-<div align="center">
 
 # DPMem: Training-Free Dual-loop Memory Compression for Streaming Video Understanding
 
@@ -6,8 +5,6 @@
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
 
 Paper coming soon
-
-</div>
 
 > DPMem is a lightweight, training-free framework for streaming video understanding. It combines short-term visual redundancy compression with recurrent semantic memory so that pretrained video MLLMs can retain recent visual details and long-range temporal context under a bounded memory budget.
 
