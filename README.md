@@ -1,8 +1,6 @@
 <div align="center">
 
-# DPMem
-
-**Training-Free Dual-loop Memory Compression for Streaming Video Understanding**
+# DPMem: Training-Free Dual-loop Memory Compression for Streaming Video Understanding**
 
 [![Python](https://img.shields.io/badge/Python-3.10-blue.svg)](https://www.python.org/)
 [![Qwen3-VL](https://img.shields.io/badge/Backbone-Qwen3--VL-7c3aed.svg)](https://github.com/QwenLM/Qwen3-VL)
